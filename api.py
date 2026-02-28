@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Security, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 import httpx
 import os
 
@@ -12,13 +13,31 @@ try:
 except ImportError:
     DDGS_AVAILABLE = False
 
+# --- Protection par cle API ---
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+def get_api_key(api_key: str = Security(api_key_header)):
+    """Verifie la cle API fournie dans le header X-API-Key."""
+    expected_key = os.environ.get("API_KEY", "")
+    if not expected_key:
+        # Si aucune cle n'est configuree, acces libre (mode dev)
+        return api_key
+    if api_key == expected_key:
+        return api_key
+    raise HTTPException(
+        status_code=401,
+        detail="Cle API invalide ou manquante. Fournissez votre cle dans le header 'X-API-Key'.",
+    )
+
+# --- Application FastAPI ---
 app = FastAPI(
-    title="API Recherche Web Gratuite",
+    title="API Recherche Web Securisee",
     description=(
-        "API de recherche web gratuite utilisant DuckDuckGo (texte, actualites, images) "
-        "et Wikipedia comme source supplementaire. Aucune cle API requise."
+        "API de recherche web utilisant DuckDuckGo (texte, actualites, images) "
+        "et Wikipedia. Protegee par cle API (header X-API-Key)."
     ),
-    version="2.0.0"
+    version="3.0.0"
 )
 
 # Autoriser tout le monde (CORS)
@@ -56,9 +75,10 @@ class ImageResult(BaseModel):
 @app.get("/")
 def accueil():
     return {
-        "message": "API Recherche Web Gratuite en ligne !",
-        "version": "2.0.0",
+        "message": "API Recherche Web Securisee en ligne !",
+        "version": "3.0.0",
         "moteur": "DuckDuckGo + Wikipedia",
+        "authentification": "Header requis : X-API-Key: <votre_cle>",
         "endpoints": {
             "/search": "Recherche web generale  (?q=...&max_results=10&region=fr-fr)",
             "/news": "Recherche d'actualites     (?q=...&max_results=10)",
@@ -66,10 +86,9 @@ def accueil():
             "/wikipedia": "Recherche Wikipedia       (?q=...&lang=fr)",
         },
         "exemples": [
-            "/search?q=python+tutorial",
-            "/news?q=intelligence+artificielle",
-            "/images?q=tour+eiffel",
-            "/wikipedia?q=Paris&lang=fr",
+            "curl -H 'X-API-Key: VOTRE_CLE' https://api-recherche-web.onrender.com/search?q=python",
+            "curl -H 'X-API-Key: VOTRE_CLE' https://api-recherche-web.onrender.com/news?q=IA",
+            "curl -H 'X-API-Key: VOTRE_CLE' https://api-recherche-web.onrender.com/wikipedia?q=Paris&lang=fr",
         ],
         "documentation": "/docs",
     }
@@ -80,20 +99,16 @@ def recherche_web(
     q: str = Query(..., description="Terme a rechercher"),
     max_results: int = Query(10, ge=1, le=50, description="Nombre maximum de resultats"),
     region: str = Query("fr-fr", description="Region (ex: fr-fr, en-us, wt-wt)"),
+    api_key: str = Depends(get_api_key),
 ):
-    """
-    Recherche web generale via DuckDuckGo.
-    """
+    """Recherche web generale via DuckDuckGo. Requiert X-API-Key."""
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="Parametre 'q' requis et non vide.")
-
     if not DDGS_AVAILABLE:
         raise HTTPException(status_code=503, detail="Moteur de recherche non disponible.")
-
     try:
         with DDGS() as ddgs:
             raw = list(ddgs.text(q.strip(), max_results=max_results, region=region))
-
         results = [
             SearchResult(
                 title=item.get("title", "Sans titre"),
@@ -103,14 +118,7 @@ def recherche_web(
             )
             for item in raw
         ]
-
-        return {
-            "query": q,
-            "region": region,
-            "count": len(results),
-            "results": [r.model_dump() for r in results],
-        }
-
+        return {"query": q, "region": region, "count": len(results), "results": [r.model_dump() for r in results]}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Erreur lors de la recherche : {str(exc)}")
 
@@ -120,20 +128,16 @@ def recherche_actualites(
     q: str = Query(..., description="Terme a rechercher"),
     max_results: int = Query(10, ge=1, le=50, description="Nombre maximum de resultats"),
     region: str = Query("fr-fr", description="Region (ex: fr-fr, en-us)"),
+    api_key: str = Depends(get_api_key),
 ):
-    """
-    Recherche d'actualites via DuckDuckGo News.
-    """
+    """Recherche d'actualites via DuckDuckGo News. Requiert X-API-Key."""
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="Parametre 'q' requis et non vide.")
-
     if not DDGS_AVAILABLE:
         raise HTTPException(status_code=503, detail="Moteur de recherche non disponible.")
-
     try:
         with DDGS() as ddgs:
             raw = list(ddgs.news(q.strip(), max_results=max_results, region=region))
-
         results = [
             NewsResult(
                 title=item.get("title", "Sans titre"),
@@ -144,14 +148,7 @@ def recherche_actualites(
             )
             for item in raw
         ]
-
-        return {
-            "query": q,
-            "region": region,
-            "count": len(results),
-            "results": [r.model_dump() for r in results],
-        }
-
+        return {"query": q, "region": region, "count": len(results), "results": [r.model_dump() for r in results]}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Erreur lors de la recherche : {str(exc)}")
 
@@ -161,20 +158,16 @@ def recherche_images(
     q: str = Query(..., description="Terme a rechercher"),
     max_results: int = Query(10, ge=1, le=50, description="Nombre maximum de resultats"),
     region: str = Query("fr-fr", description="Region (ex: fr-fr, en-us)"),
+    api_key: str = Depends(get_api_key),
 ):
-    """
-    Recherche d'images via DuckDuckGo Images.
-    """
+    """Recherche d'images via DuckDuckGo Images. Requiert X-API-Key."""
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="Parametre 'q' requis et non vide.")
-
     if not DDGS_AVAILABLE:
         raise HTTPException(status_code=503, detail="Moteur de recherche non disponible.")
-
     try:
         with DDGS() as ddgs:
             raw = list(ddgs.images(q.strip(), max_results=max_results, region=region))
-
         results = [
             ImageResult(
                 title=item.get("title", "Sans titre"),
@@ -185,14 +178,7 @@ def recherche_images(
             )
             for item in raw
         ]
-
-        return {
-            "query": q,
-            "region": region,
-            "count": len(results),
-            "results": [r.model_dump() for r in results],
-        }
-
+        return {"query": q, "region": region, "count": len(results), "results": [r.model_dump() for r in results]}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Erreur lors de la recherche : {str(exc)}")
 
@@ -201,13 +187,11 @@ def recherche_images(
 async def recherche_wikipedia(
     q: str = Query(..., description="Terme a rechercher sur Wikipedia"),
     lang: str = Query("fr", description="Langue Wikipedia (fr, en, de, es, ...)"),
+    api_key: str = Depends(get_api_key),
 ):
-    """
-    Recherche et resume Wikipedia via l'API officielle gratuite.
-    """
+    """Recherche et resume Wikipedia via l'API officielle gratuite. Requiert X-API-Key."""
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="Parametre 'q' requis et non vide.")
-
     try:
         search_url = f"https://{lang}.wikipedia.org/w/api.php"
         params_search = {
@@ -217,8 +201,7 @@ async def recherche_wikipedia(
             "format": "json",
             "srlimit": 5,
         }
-
-        headers = {"User-Agent": "SearchAPI/2.0 (https://github.com/api-recherche)"}
+        headers = {"User-Agent": "SearchAPI/3.0 (https://github.com/sonia-video-api/api-recherche-web)"}
         async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
             resp = await client.get(search_url, params=params_search)
             resp.raise_for_status()
@@ -228,7 +211,6 @@ async def recherche_wikipedia(
         if not search_results:
             return {"query": q, "lang": lang, "count": 0, "results": []}
 
-        # Recuperer le resume du premier article
         top_title = search_results[0]["title"]
         params_summary = {
             "action": "query",
@@ -238,7 +220,6 @@ async def recherche_wikipedia(
             "titles": top_title,
             "format": "json",
         }
-
         async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
             resp2 = await client.get(search_url, params=params_summary)
             resp2.raise_for_status()
@@ -246,18 +227,17 @@ async def recherche_wikipedia(
 
         pages = data2.get("query", {}).get("pages", {})
         page = next(iter(pages.values()), {})
-        extract = page.get("extract", "")[:1000]  # Limiter a 1000 caracteres
+        extract = page.get("extract", "")[:1000]
 
         results = [
             {
                 "title": item["title"],
                 "url": f"https://{lang}.wikipedia.org/wiki/{item['title'].replace(' ', '_')}",
-                "snippet": item.get("snippet", "").replace("<span class=\"searchmatch\">", "").replace("</span>", ""),
+                "snippet": item.get("snippet", "").replace('<span class="searchmatch">', "").replace("</span>", ""),
                 "wordcount": item.get("wordcount", 0),
             }
             for item in search_results
         ]
-
         return {
             "query": q,
             "lang": lang,
@@ -269,7 +249,6 @@ async def recherche_wikipedia(
             },
             "results": results,
         }
-
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Erreur Wikipedia : {str(exc)}")
 
